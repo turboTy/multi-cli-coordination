@@ -1,0 +1,16 @@
+# 运行时产物（凭据/队列/桥状态）——绝不提交
+coordination/board.json
+coordination/clients.json
+**/board.json
+**/wsc-login.json
+**/.login-lock.json
+**/workbuddy-endpoint.json
+**/trae-deploy.json
+**/*-bridge.log
+**/desktop-bridge/
+**/ekko-state/
+**/*.db
+**/*.db-shm
+**/*.db-wal
+node_modules/
+*.log
