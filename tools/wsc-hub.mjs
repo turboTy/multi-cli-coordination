@@ -13,7 +13,7 @@ import { createInterface } from 'node:readline';
 export const ROOT = process.env.WSC_ROOT
   ? path.resolve(process.env.WSC_ROOT)
   : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ROLES = { chatgpt: 'planner', workbuddy: 'executor', trae: 'executor', qoder: 'executor' };
+const ROLES = { chatgpt: 'planner', ds: 'planner', workbuddy: 'executor', trae: 'executor', qoder: 'executor' };
 const STATES = ['draft', 'approved', 'in-progress', 'awaiting-acceptance', 'accepted', 'cancelled'];
 const FIELDS = {
   list: [], get: ['id'], create: ['id', 'title', 'requirements', 'acceptance', 'allowedPaths', 'owner'],
@@ -65,7 +65,7 @@ function tasksConflict(left, right) {
 
 // _testIo is available only to direct module tests; CLI/MCP never accept I/O overrides.
 export function createHub({ root = ROOT, client, _testIo = {} } = {}) {
-  if (!Object.hasOwn(ROLES, client)) throw new Error('身份必须为 chatgpt、workbuddy、trae 或 qoder');
+  if (!Object.hasOwn(ROLES, client)) throw new Error('身份必须为 chatgpt、ds、workbuddy、trae 或 qoder');
   const boardPath = path.join(root, 'coordination/board.json');
   const role = ROLES[client];
   async function readBoard() {
@@ -83,7 +83,7 @@ export function createHub({ root = ROOT, client, _testIo = {} } = {}) {
       if (!Array.isArray(task.history)) throw new Error('队列缺少历史');
       if (task.status === 'cancelled') {
         const cancellation = task.history.at(-1);
-        if (!cancellation || cancellation.action !== 'cancel' || cancellation.client !== 'chatgpt' || !timestamp(cancellation.at)) {
+        if (!cancellation || cancellation.action !== 'cancel' || ROLES[cancellation.client] !== 'planner' || !timestamp(cancellation.at)) {
           throw new Error('已取消任务缺少可审计的取消记录');
         }
         text(cancellation.note, '取消说明');
@@ -235,7 +235,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
     return;
   }
-  if (!mode || args.length > 1) throw new Error('用法：node tools/wsc-hub.mjs --client chatgpt|workbuddy|trae|qoder mcp|list|get|create|approve|renew|cancel|claim|submit|accept|return [JSON]');
+  if (!mode || args.length > 1) throw new Error('用法：node tools/wsc-hub.mjs --client chatgpt|ds|workbuddy|trae|qoder mcp|list|get|create|approve|renew|cancel|claim|submit|accept|return [JSON]');
   process.stdout.write(`${JSON.stringify(await hub.run(mode, args.length ? JSON.parse(args[0]) : {}), null, 2)}\n`);
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
