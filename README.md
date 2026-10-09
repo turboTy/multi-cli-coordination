@@ -3,6 +3,8 @@
 **让多个 CLI / AI Agent（ChatGPT、Codex、Claude、TRAE、WorkBuddy、qoder……）围绕同一个项目安全协作的工具包**：一个共享任务队列 + 一个把任务推进到目标会话的桌面桥 + 一个 Ekko 会话通道。纯 Node 内置模块，零第三方依赖。
 
 > 从真实游戏项目（WASTELAND CHOICE）的多 Agent 生产协作中抽出，已在 Windows 本机长期运行。
+>
+> 🔧 **把桥接进真实客户端前，先读 [PITFALLS.md](PITFALLS.md)**——真实 WB / TRAE / Qoder 三通道联调的踩坑与规避清单（每条含现象 / 根因 / 规避 / 验证四项）。
 
 ## 它解决什么问题
 
@@ -154,6 +156,26 @@ draft ──approve──▶ approved ──claim──▶ in-progress ──sub
 - 防重放：dispatch 携带 approval revision = `sha256(任务ID + 最近一次 approve/return 时间戳)`。
 - 排查：`node tools/desktop-dispatch.mjs status workbuddy`。
 - ⚠️ 已知坑：扩展被安装到仓库外时，**不要用"相对层级推导项目根"**（层级不同会解析出错误根，导致所有校验永假）——用环境变量注入或分发时落配置文件。
+
+## 进阶 1.5 · 多进程共存与独立部署（WSC_ROOT / WSC_BRIDGE_HOME）
+
+两个环境变量解决「工具包部署在独立目录 / 多套桥并行」的场景；**都不设置时默认行为与上游完全一致**。
+
+| 环境变量 | 作用对象 | 不设置时（默认） | 设置后 |
+|---|---|---|---|
+| `WSC_ROOT` | `tools/wsc-hub.mjs` | 队列正本按脚本自身位置向上一级推导 | 队列正本指向**另一个项目根**（目标会话所在工作区） |
+| `WSC_BRIDGE_HOME` | `tools/desktop-dispatch.mjs` | 桥状态目录用共享 `desktop-bridge/` | 使用**私有桥状态目录**（`{client}-endpoint.json`、`trae-deploy.json`、`workbuddy-runtime-config.json` 落在这里） |
+
+**为什么需要**：桥按项目根绑定（`ep.root === ROOT`），且状态目录里的文件名是单例——多进程共用一个 HOME 必然互相覆盖（实测坑，详见 [PITFALLS.md](PITFALLS.md) 共性 1/2）。
+
+**多进程共存用法**：每个部署进程一组独立 `(WSC_ROOT, WSC_BRIDGE_HOME)` + 独立扩展 ID + 不可变 `<sessionId>` 绑定；多个部署指向同一个 `WSC_ROOT` 时，共享队列的 `board.json.lock` 跨进程互斥依然有效。
+
+```bash
+# 例：独立部署的 mcc 实例，队列正本在目标工作区、状态目录私有
+WSC_ROOT=/path/to/target-workspace \
+WSC_BRIDGE_HOME=~/.local/share/wsc-hub/mcc-desktop-bridge \
+node tools/desktop-dispatch.mjs status workbuddy
+```
 
 ## 进阶 2 · Ekko 会话通道（可选）
 

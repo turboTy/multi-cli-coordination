@@ -7,7 +7,12 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createHub, ROOT } from './wsc-hub.mjs';
 
-const BRIDGE_HOME = path.join(os.homedir(), '.local/share/wsc-hub/desktop-bridge');
+// MCC 独立部署补丁（唯一改动）：允许用 WSC_BRIDGE_HOME 指定私有状态目录。
+// 上游把 HOME 硬编码为共享 desktop-bridge，其中 {client}-endpoint.json / trae-deploy.json /
+// workbuddy-runtime-config.json 都是单例文件名，多进程共存时互相覆盖。未设该变量时保持上游默认行为。
+const BRIDGE_HOME = process.env.WSC_BRIDGE_HOME
+  ? path.resolve(process.env.WSC_BRIDGE_HOME)
+  : path.join(os.homedir(), '.local/share/wsc-hub/desktop-bridge');
 function bridgeError(message, notSent = false) { return Object.assign(new Error(message), { notSent }); }
 function validateResponse(value, client, action, id) {
   const valid = value && value.client === client && (action === 'status'

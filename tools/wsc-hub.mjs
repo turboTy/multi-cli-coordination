@@ -6,7 +6,13 @@ import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 
 // 项目根 = 本脚本所在 tools/ 目录的上一级；队列正本固定在 <root>/coordination/board.json。
-export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// MCC 独立部署补丁（唯一改动）：允许用 WSC_ROOT 指定队列正本所在的项目根。
+// 上游按本文件位置向上两级推导项目根；当需要把队列指向另一个项目（例如目标会话所在的工作区）时必须显式指定。
+// 锁文件为 <root>/coordination/board.json.lock，因此指向同一 board 的多个进程仍共享同一把锁，互斥有效。
+// 未设该变量时保持上游行为。
+export const ROOT = process.env.WSC_ROOT
+  ? path.resolve(process.env.WSC_ROOT)
+  : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ROLES = { chatgpt: 'planner', workbuddy: 'executor', trae: 'executor', qoder: 'executor' };
 const STATES = ['draft', 'approved', 'in-progress', 'awaiting-acceptance', 'accepted', 'cancelled'];
 const FIELDS = {

@@ -12,3 +12,7 @@
 **/*.db-wal
 node_modules/
 *.log
+
+# MCC 本地实测资产（不入库）
+/.mcc-test/
+/QODER-CHANNEL.md
