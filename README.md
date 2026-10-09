@@ -132,7 +132,7 @@ draft ──approve──▶ approved ──claim──▶ in-progress ──sub
 2. 凭据（Ekko 登录、桥 key）只存用户目录 `.local/share/wsc-hub/`，绝不进仓库。
 3. 身份钉死不可参数化切换；执行端只动 `allowedPaths`；submit ≠ 放行（质量验收与主线裁决是独立环节）。
 4. submit 证据只写实测观察，时间戳来自真实工具返回——**绝不预填未发生的事件**。
-5. 并行开发用独立 git worktree（`worktree-manager.mjs`）。
+5. 并行开发用独立 git worktree 隔离各执行端。
 
 ## 文件清单
 
@@ -147,12 +147,11 @@ draft ──approve──▶ approved ──claim──▶ in-progress ──sub
 | `ekko-mcp.mjs` | Ekko 通道认证 wrapper（**依赖 [ekko-studio](https://github.com/EKKOLearnAI/ekko-studio) 官方包**，见致谢） |
 | `start-ekko.ps1` | Ekko 控制面标准启动（127.0.0.1:8648） |
 | `check-hub.mjs` | 队列与桥环境健康检查 |
-| `worktree-manager.mjs` | 并行开发 git worktree 管理 |
 
 ## 致谢（Acknowledgements）
 
 - **[Ekko Studio](https://github.com/EKKOLearnAI/ekko-studio)**（EKKOLearnAI，原 Hermes Studio）：local-first 的多 Agent 工作区，支持 Hermes / Ekko / Claude Code / Codex / Pi / Grok / OpenCode / DSH 等运行时的多 agent 聊天、编码与可视化工作流，提供桌面端与自托管 Web 控制台，并通过 `ekko_studio_*` 前缀的 MCP 工具集对外暴露能力。本工具包的 **Ekko 通道**（`ekko-mcp.mjs` 认证 wrapper 与 `start-ekko.ps1` 启动器）直接构建在其官方 npm 包 `ekko-studio` 与官方 MCP 入口 `bin/ekko-studio-mcp.mjs` 之上——没有这个项目，"Ekko 会话通道"这一形态不存在。Ekko Studio 采用 **BSL-1.1** 许可证（以[原仓库 LICENSE](https://github.com/EKKOLearnAI/ekko-studio/blob/main/LICENSE) 为准）；本工具包不包含、不修改其任何代码，仅做进程启动与登录态包装，使用请遵守其许可证条款。
-- 感谢 [WASTELAND CHOICE](https://github.com/turboTy/wasteland-choice) 项目：本工具包从其生产级多 Agent 协作流程（planner/executor 队列 + 桌面桥）中抽出，所有设计都经真实任务打磨。
+- 感谢 WASTELAND CHOICE 项目：本工具包从其生产级多 Agent 协作流程（planner/executor 队列 + 桌面桥）中抽出，所有设计都经真实任务打磨。
 
 ## License
 
