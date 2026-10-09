@@ -1,0 +1,15 @@
+{
+  "name": "wsc-coordination-bridge",
+  "publisher": "wsc-local",
+  "displayName": "本机派发桥接（TRAE）",
+  "description": "接收本机已批准的共享队列任务并调用 TRAE 桌面聊天",
+  "version": "0.2.3",
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "activationEvents": [
+    "onUri",
+    "onStartupFinished"
+  ],
+  "main": "./extension.cjs"
+}

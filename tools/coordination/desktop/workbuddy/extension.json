@@ -1,9 +1,0 @@
-{
-  "id": "wsc-coordination-bridge",
-  "name": "WSC 本机任务派发",
-  "version": "0.2.1",
-  "description": "仅把本机 WSC 已批准任务派发给 WorkBuddy 真实会话",
-  "kind": "platform",
-  "permissions": ["conversations.get", "conversations.runPrompt"],
-  "service": { "entry": "./server/index.cjs", "process": "fork", "activationEvents": ["onStartup"] }
-}

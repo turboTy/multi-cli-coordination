@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 
-export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+// 项目根 = 本脚本所在 tools/ 目录的上一级；队列正本固定在 <root>/coordination/board.json。
+export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ROLES = { chatgpt: 'planner', workbuddy: 'executor', trae: 'executor', qoder: 'executor' };
 const STATES = ['draft', 'approved', 'in-progress', 'awaiting-acceptance', 'accepted', 'cancelled'];
 const FIELDS = {
@@ -228,7 +229,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
     return;
   }
-  if (!mode || args.length > 1) throw new Error('用法：node tools/coordination/wsc-hub.mjs --client chatgpt|workbuddy|trae|qoder mcp|list|get|create|approve|renew|cancel|claim|submit|accept|return [JSON]');
+  if (!mode || args.length > 1) throw new Error('用法：node tools/wsc-hub.mjs --client chatgpt|workbuddy|trae|qoder mcp|list|get|create|approve|renew|cancel|claim|submit|accept|return [JSON]');
   process.stdout.write(`${JSON.stringify(await hub.run(mode, args.length ? JSON.parse(args[0]) : {}), null, 2)}\n`);
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });

@@ -1,0 +1,18 @@
+{
+  "id": "wsc-coordination-bridge",
+  "name": "本机任务派发（WorkBuddy）",
+  "version": "0.3.0",
+  "description": "仅把本机共享队列中已批准任务派发给 WorkBuddy 真实会话",
+  "kind": "platform",
+  "permissions": [
+    "conversations.get",
+    "conversations.runPrompt"
+  ],
+  "service": {
+    "entry": "./server/index.cjs",
+    "process": "fork",
+    "activationEvents": [
+      "onStartup"
+    ]
+  }
+}

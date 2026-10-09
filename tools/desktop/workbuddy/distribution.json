@@ -1,0 +1,18 @@
+{
+  "extensionId": "wsc-coordination-bridge",
+  "version": "0.3.0",
+  "kind": "platform",
+  "grantedPermissions": [
+    "conversations.get",
+    "conversations.runPrompt"
+  ],
+  "processPolicy": {
+    "server": "fork"
+  },
+  "rollout": {
+    "strategy": "full",
+    "percentage": 100
+  },
+  "status": "active",
+  "resident": true
+}

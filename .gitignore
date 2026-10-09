@@ -1,6 +1,5 @@
 # 运行时产物（凭据/桥状态）——绝不提交。coordination/board.json 种子随仓库跟踪，
 # 用户侧的真实任务数据是否入库由使用者自定。
-coordination/clients.json
 **/wsc-login.json
 **/.login-lock.json
 **/workbuddy-endpoint.json

@@ -168,7 +168,7 @@ async function activate(context) {
         pending = { id: task.id, revision: req.approvalKey };
         ownPending = pending;
         try {
-          const prompt = `你是 vs-WSC 的 TRAE 执行端。请现在实际调用 wsc_list/get，核对并领取 ${task.id}；读取完整 history，优先处理最新 return 的修订要求。只按任务 allowedPaths 实施，再 submit 摘要和可复查证据。先读 docs/coordination/pilot-01-plan.md 与任务要求的文档。不得切换 planner 身份、自验放行或改其他文件。如 MCP 不可用，允许同一 wsc-hub.mjs --client trae CLI 完成任务流，但记录真实通道，不冒称 MCP 成功。要求：${task.requirements}\n验收：${JSON.stringify(task.acceptance)}\n允许路径：${JSON.stringify(task.allowedPaths)}`;
+          const prompt = `你是本项目的 TRAE 执行端。请现在实际调用 wsc_list/get，核对并领取 ${task.id}；读取完整 history，优先处理最新 return 的修订要求。只按任务 allowedPaths 实施，再 submit 摘要和可复查证据。先读项目协作文档（如 README 的执行端章节）与任务要求的文档。不得切换 planner 身份、自验放行或改其他文件。如 MCP 不可用，允许同一 wsc-hub.mjs --client trae CLI 完成任务流，但记录真实通道，不冒称 MCP 成功。要求：${task.requirements}\n验收：${JSON.stringify(task.acceptance)}\n允许路径：${JSON.stringify(task.allowedPaths)}`;
           invocationStarted = true;
           const response = await vscode.commands.executeCommand('wx.bridge.sendAndWaitResponse', prompt);
           await fs.writeFile(path.join(HOME, `${task.id}-reply.json`), JSON.stringify({ id: task.id, client: 'trae', at: new Date().toISOString(), response }, null, 2));

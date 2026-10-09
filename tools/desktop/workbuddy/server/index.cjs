@@ -4,11 +4,13 @@ const path = require('node:path');
 const os = require('node:os');
 const net = require('node:net');
 const crypto = require('node:crypto');
-// 从文件自身位置推导仓库根：原实现写死 D:/www/wasteland-choice，换机/换目录即失效。
-const ROOT = path.resolve(__dirname, '../../../../..').replace(/\\/g, '/');
+// 从文件自身位置推导仓库根（server/ 在 tools/desktop/workbuddy/ 下，向上一级即项目根）。
+const ROOT = path.resolve(__dirname, '../../../..').replace(/\\/g, '/');
 const HOME = path.join(os.homedir(), '.local/share/wsc-hub/desktop-bridge');
-const CONVERSATION_ID = 'a4f51342-9530-4619-af1a-dc99ecdcf239';
-const CONVERSATION_TITLE = 'VS - MICRO-HANDOFF-WB-001';
+// ★必填：目标会话 ID 与标题（在 WorkBuddy 目标对话属性里查看后填入）。
+// 派发前会校验该会话存在且其工作目录等于仓库根，不匹配即拒发（不静默新建会话）。
+const CONVERSATION_ID = '';
+const CONVERSATION_TITLE = '';
 const requests = new Map();
 let server;
 let busy = false;
@@ -88,7 +90,7 @@ async function activate() {
             const checked = await invoke('wb:conversations:get', [CONVERSATION_ID]);
             conversationVerified = checked?.info?.id === CONVERSATION_ID && checked?.info?.space?.cwd?.replaceAll('\\', '/').toLowerCase() === ROOT.toLowerCase();
           } catch {}
-          return reply({ client: 'workbuddy', version: '0.2.1', root: ROOT, busy, hostConnected: process.connected, conversationId: CONVERSATION_ID, conversationTitle: CONVERSATION_TITLE, conversationVerified, lastDispatch });
+          return reply({ client: 'workbuddy', version: '0.3.0', root: ROOT, busy, hostConnected: process.connected, conversationId: CONVERSATION_ID, conversationTitle: CONVERSATION_TITLE, conversationVerified, lastDispatch });
         }
         if (req.action !== 'dispatch' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(req.id ?? '')) return reply({ error: 'INVALID_REQUEST', notSent: true });
         if (busy) return reply({ error: 'BUSY', notSent: true });
@@ -104,7 +106,7 @@ async function activate() {
         ownPending = pending;
         try {
           const { conversationId, reused } = await getProjectConversation();
-          const prompt = `你是 vs-WSC 的 WorkBuddy 执行端。请实际调用 wsc_list/get 核对 ${task.id}，阅读完整 history 并优先处理最新 return 意见，再 claim。只按允许路径执行，保护所有在途改动，不提交推送、不切换 planner、自验放行。完成后 submit 摘要与 SHA256 等可复查证据。先读 AGENTS、WB CURRENT/INDEX 和 docs/coordination/README.md，再按任务要求追读。MCP 不可用时允许同一 wsc-hub.mjs --client workbuddy CLI，但如实标通道。要求：${task.requirements}\n验收：${JSON.stringify(task.acceptance)}\n允许路径：${JSON.stringify(task.allowedPaths)}`;
+          const prompt = `你是本项目的 WorkBuddy 执行端。请实际调用 wsc_list/get 核对 ${task.id}，阅读完整 history 并优先处理最新 return 意见，再 claim。只按允许路径执行，保护所有在途改动，不提交推送、不切换 planner、自验放行。完成后 submit 摘要与 SHA256 等可复查证据。先读项目协作文档（如 README 的执行端章节），再按任务要求追读。MCP 不可用时允许同一 wsc-hub.mjs --client workbuddy CLI，但如实标通道。要求：${task.requirements}\n验收：${JSON.stringify(task.acceptance)}\n允许路径：${JSON.stringify(task.allowedPaths)}`;
           invocationStarted = true;
           lastDispatch = { id: task.id, conversationId, conversationReused: reused, state: 'native-request-sent', at: new Date().toISOString() };
           const response = invoke('wb:conversations:runPrompt', [conversationId, [{ type: 'text', text: prompt }], { clientRequestId: req.approvalKey, timeoutMs: 600000 }], 610000);

@@ -36,7 +36,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 # vsix 部署形态下扩展无法从安装目录推导仓库根，先把仓库根写入用户目录下的独立部署配置（UTF-8 无 BOM）。
 $taskBridgeHome = Join-Path $env:USERPROFILE '.local/share/wsc-hub/desktop-bridge'
 New-Item -ItemType Directory -Path $taskBridgeHome -Force | Out-Null
-$taskDeployRoot = ((Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path -replace '\\', '/')
+$taskDeployRoot = ((Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path -replace '\\', '/')
 $taskDeployConfig = Join-Path $taskBridgeHome 'trae-deploy.json'
 $taskDeployJson = ([pscustomobject]@{ schemaVersion = 1; client = 'trae'; root = $taskDeployRoot } | ConvertTo-Json -Compress)
 [System.IO.File]::WriteAllText($taskDeployConfig, $taskDeployJson, (New-Object System.Text.UTF8Encoding($false)))
