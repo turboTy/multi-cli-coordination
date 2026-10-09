@@ -75,7 +75,7 @@ export async function recordDelivery(hub, { id, channel, state, error } = {}) {
   }
 }
 
-export async function callBridge(action, id, { home = BRIDGE_HOME, timeoutMs, client = 'trae', approvalKey: revision } = {}) {
+export async function callBridge(action, id, { home = BRIDGE_HOME, timeoutMs, client = 'trae', approvalKey: revision, nonce } = {}) {
   timeoutMs ??= client === 'workbuddy' && action === 'dispatch' ? 30000 : 10000;
   if (!['trae', 'workbuddy'].includes(client)) throw bridgeError('未知执行端', true);
   if (action === 'dispatch') {
@@ -98,7 +98,7 @@ export async function callBridge(action, id, { home = BRIDGE_HOME, timeoutMs, cl
     let sent = false;
     const timer = setTimeout(() => finish(bridgeError('桥接响应超时；先检查队列，勿盲目重发', !sent)), timeoutMs);
     const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); socket.destroy(); error ? reject(error) : resolve(value); };
-    socket.on('connect', () => { sent = true; socket.write(JSON.stringify({ key: ep.key, action, ...(id ? { id, approvalKey: revision } : {}) }) + '\n'); });
+    socket.on('connect', () => { sent = true; socket.write(JSON.stringify({ key: ep.key, action, ...(id ? { id, approvalKey: revision, ...(nonce ? { nonce } : {}) } : {}) }) + '\n'); });
     socket.on('data', chunk => {
       data += chunk.toString('utf8');
       if (data.length > 4096) return finish(new Error('桥接响应过大'));
@@ -151,7 +151,9 @@ export async function dispatchTask(id, { planner = DEFAULT_PLANNER, hub = planne
     const record = { id, owner: task.owner, approvalKey: key, at: new Date().toISOString(), state: 'attempting', priorAttempts: priorAttempt ? [...priorAttempt.priorAttempts ?? [], { at: priorAttempt.at, state: priorAttempt.state, error: priorAttempt.error }] : [] };
     await saveReceipt(receipt, record, !priorAttempt);
     try {
-      const native = validateResponse(await call('dispatch', id, { home, client: task.owner, approvalKey: key }), task.owner, 'dispatch', id);
+      // 契约 §3：令牌以队列为正本；首次投递时 nonce 尚未由 dispatch 动作铸造，
+      // 故只把板上已有值随调用送达，扩展侧仍自行读取 task.nonce 为准。
+      const native = validateResponse(await call('dispatch', id, { home, client: task.owner, approvalKey: key, ...(task.nonce ? { nonce: task.nonce } : {}) }), task.owner, 'dispatch', id);
       await saveReceipt(receipt, { ...record, state: 'native-invoked', native });
       const delivery = await recordDelivery(hub, { id, channel, state: 'sent' });
       return { id, nativeInvoked: true, status: (await hub.run('get', { id })).status, receipt, route: route.presence, delivery, completion: '等待执行端 submit；需要规划端独立验收' };
