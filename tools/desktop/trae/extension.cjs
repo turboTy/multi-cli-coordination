@@ -1,4 +1,8 @@
-const vscode = require('vscode');
+const vscode = (() => {
+  // 契约 §3 要求判据与 prompt 构造是单测可直接调用的纯函数；vscode 只在扩展宿主内可解析，
+  // 因此宿主外的 require 只取纯函数，activate 会因为没有宿主而自行跳过。
+  try { return require('vscode'); } catch { return undefined; }
+})();
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
@@ -16,6 +20,30 @@ const VERSION = '0.2.2';
 let server;
 let busy = false;
 let pending;
+
+// —— 契约 §3：回执 nonce 的 prompt 构造与判据。纯函数，宿主外可直接单测。——
+const NONCE_PATTERN = /^MCC-ACK-[0-9a-f]{8}$/;
+const ackInstruction = nonce => `【回执】完成后必须在回复中原文包含一次性令牌 ${nonce}，不得改写或省略。`;
+function buildDeliveryPrompt(base, nonce) {
+  return NONCE_PATTERN.test(nonce ?? '') ? `${base}\n${ackInstruction(nonce)}` : base;
+}
+function replyTextOf(value) {
+  if (typeof value === 'string') return value;
+  if (!value || typeof value !== 'object') return '';
+  if (typeof value.text === 'string') return value.text;
+  if (Array.isArray(value.content)) return value.content.filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text).join('');
+  return '';
+}
+// 判据只有一句 replyText.includes(nonce)：没有大小写折叠、归一化、相似度或语义比较分支。
+function judgeAck(reply, nonce) {
+  const replyText = replyTextOf(reply);
+  if (!NONCE_PATTERN.test(nonce ?? '')) return { requested: false, matchesExpected: false, match: 'not-requested', replyText };
+  const matchesExpected = replyText.includes(nonce);
+  return { requested: true, matchesExpected, match: matchesExpected ? 'nonce' : 'none', replyText };
+}
+function ackLedger({ task, nonce, verdict, payload }) {
+  return { id: task.id, client: 'trae', at: new Date().toISOString(), nonce: nonce ?? null, replyText: verdict.replyText, match: verdict.match, matchesExpected: verdict.matchesExpected, response: payload };
+}
 
 // 日志只写时间戳、事件名与定位信息，严禁含鉴权 key、token 或凭据。
 async function appendLog(event, detail) {
@@ -102,6 +130,7 @@ async function getSessionBinding() {
 }
 
 async function activate(context) {
+  if (!vscode) { await appendLog('ACTIVATE_SKIPPED', 'vscode host module unavailable (not an extension host)'); return; }
   const root = await resolveRoot();
   if (!root) return;
   const container = path.resolve(root, '..').replace(/\\/g, '/');
@@ -168,11 +197,16 @@ async function activate(context) {
         pending = { id: task.id, revision: req.approvalKey };
         ownPending = pending;
         try {
-          const prompt = `你是本项目的 TRAE 执行端。请现在实际调用 wsc_list/get，核对并领取 ${task.id}；读取完整 history，优先处理最新 return 的修订要求。只按任务 allowedPaths 实施，再 submit 摘要和可复查证据。先读项目协作文档（如 README 的执行端章节）与任务要求的文档。不得切换 planner 身份、自验放行或改其他文件。如 MCP 不可用，允许同一 wsc-hub.mjs --client trae CLI 完成任务流，但记录真实通道，不冒称 MCP 成功。要求：${task.requirements}\n验收：${JSON.stringify(task.acceptance)}\n允许路径：${JSON.stringify(task.allowedPaths)}`;
+          // 队列是唯一正本：令牌只取 task.nonce；派发侧声明的 req.nonce 与队列不符只记日志，不冒充队列要求。
+          const nonce = typeof task.nonce === 'string' && NONCE_PATTERN.test(task.nonce) ? task.nonce : undefined;
+          if (req.nonce !== undefined && req.nonce !== nonce) await appendLog('NONCE_DECLARATION_MISMATCH', `${task.id}: queue=${nonce ?? 'none'} dispatcher=${req.nonce}`);
+          const prompt = buildDeliveryPrompt(`你是本项目的 TRAE 执行端。请现在实际调用 wsc_list/get，核对并领取 ${task.id}；读取完整 history，优先处理最新 return 的修订要求。只按任务 allowedPaths 实施，再 submit 摘要和可复查证据。先读项目协作文档（如 README 的执行端章节）与任务要求的文档。不得切换 planner 身份、自验放行或改其他文件。如 MCP 不可用，允许同一 wsc-hub.mjs --client trae CLI 完成任务流，但记录真实通道，不冒称 MCP 成功。要求：${task.requirements}\n验收：${JSON.stringify(task.acceptance)}\n允许路径：${JSON.stringify(task.allowedPaths)}`, nonce);
           invocationStarted = true;
           const response = await vscode.commands.executeCommand('wx.bridge.sendAndWaitResponse', prompt);
-          await fs.writeFile(path.join(HOME, `${task.id}-reply.json`), JSON.stringify({ id: task.id, client: 'trae', at: new Date().toISOString(), response }, null, 2));
-          reply({ id: task.id, client: 'trae', nativeInvocationReturned: true, replyFile: path.join(HOME, `${task.id}-reply.json`), completion: '以共享队列 submit 和文件证据为准' });
+          const verdict = judgeAck(response, nonce);
+          const replyFile = path.join(HOME, `${task.id}-reply.json`);
+          await fs.writeFile(replyFile, JSON.stringify(ackLedger({ task, nonce, verdict, payload: response }), null, 2));
+          reply({ id: task.id, client: 'trae', nativeInvocationReturned: true, replyFile, ackMatch: verdict.match, nonce: nonce ?? null, completion: '以共享队列 submit 和文件证据为准' });
         } finally { busy = false; if (!invocationStarted && pending === ownPending) pending = undefined; }
       })().catch(() => { reply({ error: 'DISPATCH_FAILED', notSent: !invocationStarted }); });
     });
@@ -192,4 +226,4 @@ async function activate(context) {
 }
 
 function deactivate() { server?.close(); }
-module.exports = { activate, deactivate };
+module.exports = { activate, deactivate, ackInstruction, buildDeliveryPrompt, judgeAck, replyTextOf, ackLedger, NONCE_PATTERN };

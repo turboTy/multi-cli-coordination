@@ -2,7 +2,7 @@
 import { readFile, open, rename, unlink, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
 
 // 项目根 = 本脚本所在 tools/ 目录的上一级；队列正本固定在 <root>/coordination/board.json。
@@ -13,12 +13,20 @@ import { createInterface } from 'node:readline';
 export const ROOT = process.env.WSC_ROOT
   ? path.resolve(process.env.WSC_ROOT)
   : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ROLES = { chatgpt: 'planner', workbuddy: 'executor', trae: 'executor', qoder: 'executor' };
-const STATES = ['draft', 'approved', 'in-progress', 'awaiting-acceptance', 'accepted', 'cancelled'];
+const ROLES = { chatgpt: 'planner', ds: 'planner', workbuddy: 'executor', trae: 'executor', qoder: 'executor' };
+const STATES = ['draft', 'approved', 'dispatched', 'in-progress', 'awaiting-acceptance', 'accepted', 'cancelled'];
+// 契约 §1.1：dispatched 与 in-progress 一并视为在途，用于并发冲突判定（防止重复投递）。
+const IN_FLIGHT = ['dispatched', 'in-progress'];
+// 契约 §1.2：delivery.state 的全部合法取值。
+const DELIVERY_STATES = ['sent', 'not-sent', 'uncertain', 'duplicate-prevented'];
 const FIELDS = {
   list: [], get: ['id'], create: ['id', 'title', 'requirements', 'acceptance', 'allowedPaths', 'owner'],
   approve: ['id'], renew: ['id', 'note', 'previousApprovalAt', 'previousClaimAt'], cancel: ['id', 'note'], claim: ['id'], submit: ['id', 'summary', 'evidence'], accept: ['id', 'note'], return: ['id', 'note'],
+  // 契约 §1.4：dispatch 入参；error 可选，其余必填。nonce 不在入参内——它只由本动作内部生成。
+  dispatch: ['id', 'channel', 'state', 'error'],
 };
+// toolList 的 required 由此表排除可选字段；不影响 run 的入参白名单校验。
+const OPTIONAL_FIELDS = { dispatch: ['error'] };
 const text = (value, label) => {
   if (typeof value !== 'string' || !value.trim() || value.length > 50000) throw new Error(`${label} 必须是非空文本（最多 50000 字符）`);
   return value;
@@ -31,6 +39,17 @@ const listCheck = (value, label) => {
   if (!Array.isArray(value) || !value.length || value.length > 100) throw new Error(`${label} 必须至少有一项（最多 100 项）`);
   value.forEach(item => text(item, label));
 };
+
+// 契约 §1.3：nonce 格式 MCC-ACK-<8位小写十六进制>。
+const NONCE_PATTERN = /^MCC-ACK-[0-9a-f]{8}$/;
+const newNonce = () => `MCC-ACK-${randomBytes(4).toString('hex')}`;
+// 契约 §1.2：approvalKey 为 sha256；沿用仓库既有推导（id + 最近一次 approve/return 时间戳），
+// 与 desktop-dispatch 侧一致，否则幂等键两侧对不上。
+function approvalKeyOf(task) {
+  const last = [...task.history].reverse().find(event => event.action === 'approve' || event.action === 'return');
+  if (!last) throw new Error('任务缺少批准记录，无法生成投递幂等键');
+  return createHash('sha256').update(`${task.id}:${last.at}`).digest('hex');
+}
 
 function validatePathSyntax(value) {
   text(value, '允许路径');
@@ -65,7 +84,7 @@ function tasksConflict(left, right) {
 
 // _testIo is available only to direct module tests; CLI/MCP never accept I/O overrides.
 export function createHub({ root = ROOT, client, _testIo = {} } = {}) {
-  if (!Object.hasOwn(ROLES, client)) throw new Error('身份必须为 chatgpt、workbuddy、trae 或 qoder');
+  if (!Object.hasOwn(ROLES, client)) throw new Error('身份必须为 chatgpt、ds、workbuddy、trae 或 qoder');
   const boardPath = path.join(root, 'coordination/board.json');
   const role = ROLES[client];
   async function readBoard() {
@@ -81,15 +100,24 @@ export function createHub({ root = ROOT, client, _testIo = {} } = {}) {
       for (const entry of task.allowedPaths) validatePathSyntax(entry);
       if (['awaiting-acceptance', 'accepted'].includes(task.status)) { text(task.summary, '交付摘要'); listCheck(task.evidence, '证据'); }
       if (!Array.isArray(task.history)) throw new Error('队列缺少历史');
+      if (task.nonce !== undefined && !NONCE_PATTERN.test(task.nonce)) throw new Error('任务 nonce 必须为 MCC-ACK-<8位小写十六进制>');
+      if (task.delivery !== undefined) {
+        const d = task.delivery;
+        if (!d || typeof d !== 'object' || !DELIVERY_STATES.includes(d.state) || typeof d.channel !== 'string' || !d.channel.trim()
+          || !Number.isInteger(d.attempts) || d.attempts < 1 || !timestamp(d.at) || ROLES[d.by] !== 'planner'
+          || !/^[0-9a-f]{64}$/.test(String(d.approvalKey)) || !(d.error === null || typeof d.error === 'string')) {
+          throw new Error('任务投递记录不符合契约 §1.2');
+        }
+      }
       if (task.status === 'cancelled') {
         const cancellation = task.history.at(-1);
-        if (!cancellation || cancellation.action !== 'cancel' || cancellation.client !== 'chatgpt' || !timestamp(cancellation.at)) {
+        if (!cancellation || cancellation.action !== 'cancel' || ROLES[cancellation.client] !== 'planner' || !timestamp(cancellation.at)) {
           throw new Error('已取消任务缺少可审计的取消记录');
         }
         text(cancellation.note, '取消说明');
       }
     }
-    const active = board.tasks.filter(t => t.status === 'in-progress');
+    const active = board.tasks.filter(t => IN_FLIGHT.includes(t.status));
     for (let index = 0; index < active.length; index++) {
       if (active.slice(index + 1).some(task => tasksConflict(active[index], task))) throw new Error('队列存在同一执行端或路径重叠的并发任务');
     }
@@ -142,7 +170,7 @@ export function createHub({ root = ROOT, client, _testIo = {} } = {}) {
       if (!primaryFailure && cleanupFailures.length) throw new AggregateError(cleanupFailures, '持久化完成，但清理失败；请核查遗留运行文件');
     }
   }
-  const actions = role === 'planner' ? ['list', 'get', 'create', 'approve', 'renew', 'cancel', 'accept', 'return'] : ['list', 'get', 'claim', 'submit'];
+  const actions = role === 'planner' ? ['list', 'get', 'create', 'approve', 'renew', 'cancel', 'accept', 'return', 'dispatch'] : ['list', 'get', 'claim', 'submit'];
   async function run(action, args = {}) {
     if (!actions.includes(action)) throw new Error(`身份 ${client} 无权执行 ${action}`);
     if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !FIELDS[action].includes(key))) throw new Error('非法参数；不能在调用中覆盖身份');
@@ -160,7 +188,12 @@ export function createHub({ root = ROOT, client, _testIo = {} } = {}) {
         task = { ...args, status: 'draft', history: [] }; board.tasks.push(task);
       } else {
         if (!task) throw new Error('任务不存在');
-        const expected = action === 'renew' ? ['approved', 'in-progress'] : [{ approve: 'draft', cancel: 'in-progress', claim: 'approved', submit: 'in-progress', accept: 'awaiting-acceptance', return: 'awaiting-acceptance' }[action]];
+        // 契约 §1.1：claim 同时接受 approved（无投递记录的直接领取）与 dispatched；
+        // cancel 的合法入口为 approved / dispatched / in-progress（卡死任务的唯一出口）；dispatch 仅接受 approved（§1.4）。
+        const expected = action === 'renew' ? ['approved', 'in-progress'] : {
+          approve: ['draft'], cancel: ['approved', 'dispatched', 'in-progress'], claim: ['approved', 'dispatched'],
+          dispatch: ['approved'], submit: ['in-progress'], accept: ['awaiting-acceptance'], return: ['awaiting-acceptance'],
+        }[action];
         if (!expected.includes(task.status)) throw new Error(`${action} 需要 ${expected.join('/')} 状态，当前为 ${task.status}`);
         if (action === 'renew') {
           text(args.note, '恢复说明');
@@ -174,15 +207,39 @@ export function createHub({ root = ROOT, client, _testIo = {} } = {}) {
         }
         if (role === 'executor' && task.owner !== client) throw new Error('只能领取或提交本人任务');
         if (['approve', 'renew', 'claim'].includes(action)) for (const entry of task.allowedPaths) await validateAllowedPath(root, entry);
-        if (action === 'claim' && board.tasks.some(t => t.status === 'in-progress' && tasksConflict(t, task))) throw new Error('已有同一执行端或路径重叠任务；请等待其完成');
+        // 在途冲突：dispatched 与 in-progress 一并视为占用；排除任务自身，否则 claim 已投递的任务会命中自己。
+        const inFlightConflict = () => board.tasks.some(t => t !== task && IN_FLIGHT.includes(t.status) && tasksConflict(t, task));
+        if (action === 'claim' && inFlightConflict()) throw new Error('已有同一执行端或路径重叠任务；请等待其完成');
         if (action === 'claim' && board.tasks.some(t => t.status === 'awaiting-acceptance' && t.allowedPaths.some(held => task.allowedPaths.some(candidate => pathsOverlap(held, candidate))))) throw new Error('允许路径与待验收任务重叠；请先完成该任务验收');
+        if (action === 'dispatch') {
+          if (inFlightConflict()) throw new Error('已有同一执行端或路径重叠的在途任务；禁止重复投递');
+          text(args.channel, '投递渠道');
+          if (!DELIVERY_STATES.includes(args.state)) throw new Error(`投递状态必须为 ${DELIVERY_STATES.join('/')} 之一`);
+          if (args.error !== undefined) text(args.error, '投递错误');
+          const approvalKey = approvalKeyOf(task);
+          if (task.nonce === undefined) task.nonce = newNonce();
+          else if (!NONCE_PATTERN.test(task.nonce)) throw new Error('任务 nonce 格式非法');
+          task.delivery = {
+            state: args.state,
+            channel: args.channel,
+            attempts: (task.delivery?.attempts ?? 0) + 1,
+            at: timestamp,
+            by: client,
+            approvalKey,
+            error: args.error ?? null,
+          };
+        }
         if (action === 'submit') { text(args.summary, '交付摘要'); listCheck(args.evidence, '证据'); task.summary = args.summary; task.evidence = [...args.evidence]; }
         if (action === 'cancel') text(args.note, '取消说明');
         if (action === 'accept' || action === 'return') text(args.note, '验收说明');
-        task.status = { approve: 'approved', renew: 'approved', cancel: 'cancelled', claim: 'in-progress', submit: 'awaiting-acceptance', accept: 'accepted', return: 'approved' }[action];
+        // dispatch 的状态迁移由投递状态决定（契约 §1.4）：sent → dispatched；其余保持 approved 但仍写 delivery。
+        const nextStatus = action === 'dispatch'
+          ? (args.state === 'sent' ? 'dispatched' : task.status)
+          : { approve: 'approved', renew: 'approved', cancel: 'cancelled', claim: 'in-progress', submit: 'awaiting-acceptance', accept: 'accepted', return: 'approved' }[action];
+        task.status = nextStatus;
       }
       task.updatedAt = timestamp;
-      task.history.push({ action: action === 'renew' ? 'approve' : action, client, at: timestamp, ...(args.note ? { note: args.note } : {}), ...(action === 'submit' ? { summary: args.summary, evidence: [...args.evidence] } : {}) });
+      task.history.push({ action: action === 'renew' ? 'approve' : action, client, at: timestamp, ...(args.note ? { note: args.note } : {}), ...(action === 'submit' ? { summary: args.summary, evidence: [...args.evidence] } : {}), ...(action === 'dispatch' ? { channel: args.channel, state: args.state } : {}) });
       return task;
     });
   }
@@ -194,10 +251,12 @@ const schemas = {
   title: { type: 'string', minLength: 1 }, requirements: { type: 'string', minLength: 1 },
   owner: { type: 'string', enum: ['workbuddy', 'trae', 'qoder'] }, summary: { type: 'string', minLength: 1 }, note: { type: 'string', minLength: 1 },
   acceptance: { type: 'array', minItems: 1, items: { type: 'string' } }, allowedPaths: { type: 'array', minItems: 1, items: { type: 'string' } }, evidence: { type: 'array', minItems: 1, items: { type: 'string' } }, previousApprovalAt: { type: 'string', minLength: 1 }, previousClaimAt: { type: 'string', minLength: 1 },
+  // 契约 §1.2/§1.4：dispatch 的入参形状。
+  channel: { type: 'string', minLength: 1 }, state: { type: 'string', enum: DELIVERY_STATES }, error: { type: 'string', minLength: 1 },
 };
 export function toolList(hub) {
-  const descriptions = { list: '读取共享队列与固定身份', get: '读取任务包', create: '创建草稿（不能直接开始）', approve: '批准草稿', renew: '核实原生取消后续办未完成运输，保留历史且需说明', cancel: '规划端隔离陈旧或明确取消的进行中任务', claim: '领取本人批准任务，同一端或重叠路径互斥', submit: '提交摘要和证据，等待规划端验收', accept: '据证据验收通过，需说明', return: '退回修改，需说明' };
-  return hub.actions.map(action => ({ name: `wsc_${action}`, description: descriptions[action], inputSchema: { type: 'object', properties: Object.fromEntries(FIELDS[action].map(key => [key, schemas[key]])), required: FIELDS[action], additionalProperties: false } }));
+  const descriptions = { list: '读取共享队列与固定身份', get: '读取任务包', create: '创建草稿（不能直接开始）', approve: '批准草稿', renew: '核实原生取消后续办未完成运输，保留历史且需说明', cancel: '规划端隔离陈旧或明确取消的进行中任务', claim: '领取本人批准任务，同一端或重叠路径互斥', submit: '提交摘要和证据，等待规划端验收', accept: '据证据验收通过，需说明', return: '退回修改，需说明', dispatch: '规划端记录一次投递尝试：sent 转 dispatched，其余保持 approved 并写 delivery/nonce' };
+  return hub.actions.map(action => ({ name: `wsc_${action}`, description: descriptions[action], inputSchema: { type: 'object', properties: Object.fromEntries(FIELDS[action].map(key => [key, schemas[key]])), required: FIELDS[action].filter(key => !(OPTIONAL_FIELDS[action] ?? []).includes(key)), additionalProperties: false } }));
 }
 export async function handleRpc(hub, message) {
   if (!message || message.jsonrpc !== '2.0' || typeof message.method !== 'string') return { jsonrpc: '2.0', id: message?.id ?? null, error: { code: -32600, message: '非法 JSON-RPC 请求' } };
@@ -235,7 +294,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
     return;
   }
-  if (!mode || args.length > 1) throw new Error('用法：node tools/wsc-hub.mjs --client chatgpt|workbuddy|trae|qoder mcp|list|get|create|approve|renew|cancel|claim|submit|accept|return [JSON]');
+  if (!mode || args.length > 1) throw new Error('用法：node tools/wsc-hub.mjs --client chatgpt|ds|workbuddy|trae|qoder mcp|list|get|create|approve|renew|cancel|claim|submit|accept|return|dispatch [JSON]');
   process.stdout.write(`${JSON.stringify(await hub.run(mode, args.length ? JSON.parse(args[0]) : {}), null, 2)}\n`);
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
