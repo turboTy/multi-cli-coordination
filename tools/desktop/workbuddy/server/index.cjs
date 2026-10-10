@@ -143,7 +143,15 @@ async function activate() {
           const prompt = buildDeliveryPrompt(`你是本项目的 WorkBuddy 执行端。请实际调用 wsc_list/get 核对 ${task.id}，阅读完整 history 并优先处理最新 return 意见，再 claim。只按允许路径执行，保护所有在途改动，不提交推送、不切换 planner、自验放行。完成后 submit 摘要与 SHA256 等可复查证据。先读项目协作文档（如 README 的执行端章节），再按任务要求追读。MCP 不可用时允许同一 wsc-hub.mjs --client workbuddy CLI，但如实标通道。要求：${task.requirements}\n验收：${JSON.stringify(task.acceptance)}\n允许路径：${JSON.stringify(task.allowedPaths)}`, nonce);
           invocationStarted = true;
           lastDispatch = { id: task.id, conversationId, conversationReused: reused, state: 'native-request-sent', at: new Date().toISOString() };
-          const response = invoke('wb:conversations:runPrompt', [conversationId, [{ type: 'text', text: prompt }], { clientRequestId: req.approvalKey, timeoutMs: 600000 }], 610000);
+          // [2026-10-10 ds] 回合上限由 10 分钟提到 45 分钟。原值 600000 会让**任何超过 10 分钟的任务**
+          // 在宿主侧被取消，客户端 UI 显示为「用户已取消」（取消经由与用户操作同一通道下发，故看不出是超时）。
+          // 实测三次、毫秒不差：003 派发 23:19:07→23:29:07；M1-CLOSURE 23:41:11→23:51:11；
+          // M1-AUDIO-REVIEW 08:25:36→08:35:37，回执均为 state=cancelled 且零落盘。
+          // 注意：本路径在第 147 行已把派发回执返回，第 150 行才异步等结果——**派发本身是成功的**，
+          // 被掐的是回合。审查类任务（读多份长文档 + 独立复跑）必然超过 10 分钟，故必须放宽。
+          // 外层等待须大于内层，故取 46 分钟。
+          const TURN_TIMEOUT_MS = Number(process.env.WSC_TURN_TIMEOUT_MS || 2700000);
+          const response = invoke('wb:conversations:runPrompt', [conversationId, [{ type: 'text', text: prompt }], { clientRequestId: req.approvalKey, timeoutMs: TURN_TIMEOUT_MS }], TURN_TIMEOUT_MS + 60000);
           reply({ id: task.id, client: 'workbuddy', nativeInvocationSent: true, conversationId, conversationReused: reused, nonce: nonce ?? null, completion: '以共享队列 submit 和文件证据为准' });
           const replyFile = path.join(HOME, `${task.id}-wb-reply.json`);
           try {
