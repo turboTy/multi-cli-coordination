@@ -101,12 +101,17 @@ export async function callBridge(action, id, { home = BRIDGE_HOME, timeoutMs, cl
     socket.on('connect', () => { sent = true; socket.write(JSON.stringify({ key: ep.key, action, ...(id ? { id, approvalKey: revision, ...(nonce ? { nonce } : {}) } : {}) }) + '\n'); });
     socket.on('data', chunk => {
       data += chunk.toString('utf8');
-      if (data.length > 4096) return finish(new Error('桥接响应过大'));
+      // 已收到对端数据 ⇒ 确实投递过，故 notSent:false（裸 Error 会缺失该字段，被下游按 uncertain 处理）
+      if (data.length > 4096) return finish(bridgeError('桥接响应过大', false));
       if (!data.includes('\n')) return;
       try { const result = JSON.parse(data.split('\n')[0]); result.error ? finish(bridgeError(`桥接拒绝：${result.error}`, result.notSent === true)) : finish(null, validateResponse(result, client, action, id)); }
-      catch (error) { finish(error); }
+      catch (error) { finish(bridgeError(`桥接响应无法解析：${error.message}`, false)); }
     });
     socket.on('error', () => finish(bridgeError('桥接连接失败；先检查队列，勿盲目重发', !sent)));
+    // 注意：此处的 !sent 在本机实测恒为 false —— connect 回调总先于 end 触发，
+    // 而 sent 在 connect 内紧跟 write 同步置 true。故本分支实际无法区分
+    // "连接期未写出" 与 "已写出但无完整响应"，两者都会落进 uncertain。
+    // 真正的修法是把 sent 移进 write 回调（未 flush 即未上线），改动面较大，另议。
     socket.on('end', () => { if (!data.includes('\n')) finish(new Error('桥接未返回完整响应；先检查队列')); });
   });
 }

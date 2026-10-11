@@ -54,8 +54,24 @@
 
 - **现象**：桥未激活（缺 `{client}-endpoint.json` / `state/bridge.key`）时派发失败，回执却被记成 `delivery-uncertain`；此后重派被幂等闸门挡下，报 `duplicatePrevented`，该单**再也派不出去**。
 - **根因**：`delivery-uncertain` 的语义是"可能已投递、勿盲目重发"；而"本地前置检查就失败"根本没进入传输。重派闸门只放行 `state === 'not-sent'` 的记录（`desktop-dispatch.mjs` 收据循环），分类错了就等于把重试权限一并锁死。
-- **规避或修复**：桥调用统一维护 `sent` 标志（**payload 真正写进管道/套接字才置 true**），所有失败分支按 `notSent: !sent` 分类：连不上、端点缺失、key 缺失、连接期 `end` 全部为 `not-sent`；只有"已写入但没等到回包"（超时、发送后断开）才是 `delivery-uncertain`。
-- **如何验证**：临时移走激活文件制造本地失败 → 回执 `state:"not-sent"`；恢复后**重派应被放行**（拿到新的 native 回执，而不是 `duplicatePrevented`）。反之，若确已投递则重派必须仍被拦住。
+- **规避或修复**：所有失败分支都必须**显式**给出 `notSent`，不能依赖默认值。
+  - 本地前置失败（端点缺失、key 缺失、管道连不上）：`notSent: true`。
+  - 已收到对端数据后的失败（响应过大、响应 JSON 解析失败）：`notSent: false`——此时确已投递。
+  - ⚠️ **抛裸 `Error` 是个陷阱**：`notSent` 字段缺失，下游 `error.notSent === true ? 'not-sent' : 'delivery-uncertain'`
+    会把它一律判成 uncertain。实测 `callBridge` 的「响应过大」与「JSON 解析失败」两条分支原本正是如此，
+    已改为 `bridgeError(msg, false)`。
+- **如何验证**：临时移走激活文件制造本地失败 → 收据 `state:"not-sent"`；恢复后**重派应被放行**
+  （拿到新的 native 回执，而不是 `duplicatePrevented`）。反之若确已投递，重派必须仍被拦住。
+
+> ⚠️ **一个看似正确、实则无效的写法**（实测证伪，勿照抄）：
+> 不要在 `socket.on('end')` 里用 `bridgeError(msg, !sent)` 来区分"连接期未写出"。
+> 若 `sent = true` 写在 `connect` 回调内（紧跟 `socket.write`），而 `connect` 必然早于 `end`，
+> 那么 `end` 触发时 `sent` **恒为 true**，`!sent` 永远是 `false` —— 该判断是**死代码**。
+> 验证：用假命名管道端点（服务端 accept 即 destroy、连上不读、收到数据即关闭、
+> 以及压满写缓冲的 500 KB payload），6 种场景多次重复**全部**得到 `notSent=false`。
+> 真正的修法是把 `sent` 移进 `socket.write` 的**回调**（未 flush 即未上线），
+> 并重新审视 timeout / error 分支的语义；改动面较大，需单独评估。
+
 
 
 ---
