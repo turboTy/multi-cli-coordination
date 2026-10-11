@@ -41,7 +41,22 @@
 - **现象**：执行端 submit 后状态停在 `awaiting-acceptance` 而不是 `accepted`；只看到桥回执、MCP 握手成功或进程在线，都不能当作"任务完成"。
 - **根因**：验收是 planner 的独立环节；工具链上的任何"送达/在线"信号都不等于业务闭环。
 - **规避或修复**：submit 后**停止**等验收；闭环判据固定为队列 history 中**执行端本人**的真实 `claim` + `submit`，再加 planner 的 `accept`/`return`。
-- **如何验证**：`wsc_get` 读任务 history，核对 claim/submit 的客户端身份与时间戳是否为本人真实操作，accept/return 是否带验收说明。
+- **如何验证**：`wsc_get` 读任务 history，核对 claim/submit 的客户端身份与时间戳是否为本人真实操作，accept/return 是否带验收说明。可直接用 `node tools/probe.mjs verify <owner> <stamp>` 自动判定（见共性 6）。
+
+### 6. `allowedPaths` 决定并发闸门，探测/工具类任务必须**每单独立前缀**
+
+- **现象**：三端各发一只只读探测单，第二端派发被拒：`已有冲突派发 <另一端的任务ID>，不能启动此执行者`；撤销那一单才通。之后同一端**再跑一次探测**又被自己的上一单挡住：`允许路径与待验收任务重叠；请先完成该任务验收`。
+- **根因**：路径闸门 `tasksConflict` 的判据是 `owner 相等 || allowedPaths 任一对重叠`，且 `pathsOverlap` 会**剥掉尾斜杠**做前缀比较。于是：(a) 多端共用同一路径时，任一端已存在的任务都会挡住另一端；(b) 只按 owner 分目录（`probes/<owner>/`）时，上一单闭环后停在 `awaiting-acceptance`，其 `probes/<owner>` 与新单的 `probes/<owner>/` 剥斜杠后**相等**，待验收重叠闸门照样报错。
+- **规避或修复**：探测/巡检这类可反复运行的轻量任务，`allowedPaths` 带**唯一后缀**（如 `coordination/probes/<owner>/<stamp>/`），使每一单一个独立前缀；`tools/probe.mjs` 已按此实现。业务任务则相反——**应当**共用真实工作目录，让闸门发挥串行保护作用，不要为了"跑得快"给业务单编造互不重叠的假路径。
+- **如何验证**：同一端连跑两次（第一次停在 `awaiting-acceptance`），第二次仍能 `claim` 成功；三端各有待验收单时三端 claim 互不影响。
+
+### 7. 桥"未送达"必须与"投递结果不确定"分开记，否则该单永远无法重派
+
+- **现象**：桥未激活（缺 `{client}-endpoint.json` / `state/bridge.key`）时派发失败，回执却被记成 `delivery-uncertain`；此后重派被幂等闸门挡下，报 `duplicatePrevented`，该单**再也派不出去**。
+- **根因**：`delivery-uncertain` 的语义是"可能已投递、勿盲目重发"；而"本地前置检查就失败"根本没进入传输。重派闸门只放行 `state === 'not-sent'` 的记录（`desktop-dispatch.mjs` 收据循环），分类错了就等于把重试权限一并锁死。
+- **规避或修复**：桥调用统一维护 `sent` 标志（**payload 真正写进管道/套接字才置 true**），所有失败分支按 `notSent: !sent` 分类：连不上、端点缺失、key 缺失、连接期 `end` 全部为 `not-sent`；只有"已写入但没等到回包"（超时、发送后断开）才是 `delivery-uncertain`。
+- **如何验证**：临时移走激活文件制造本地失败 → 回执 `state:"not-sent"`；恢复后**重派应被放行**（拿到新的 native 回执，而不是 `duplicatePrevented`）。反之，若确已投递则重派必须仍被拦住。
+
 
 ---
 
@@ -168,6 +183,24 @@
 - **规避或修复**：严格串行执行 `status → test → 等空闲 → receipt`，每步确认返回后再走下一步；不做并发调用。
 - **如何验证**：每步返回 `ok` 再继续；全程无断连重试。
 
+### 8. 客户端必须经启动器启动，裸启动等于没装插件
+
+- **现象**：插件、启动器、环境变量都齐了，`bridge.key` 就是不生成；`status` 一直报"桥未激活"。
+- **根因**：`QODER_APP_PLUGIN_DEV_DIRS` 等是**进程级**环境变量；从开始菜单／任务栏直接打开客户端，进程环境里没有它们，插件根本不会被加载。而 `Start-Process <exe>` 又会立刻退出（见本节 2、3 条），所以"重启一下"这个动作本身很容易做成无效重启。
+- **规避或修复**：**只经启动器 `.cmd` 启动**：退干净客户端 → `Start-Process explorer.exe <启动器.cmd>` → 轮询激活凭据。仓库提供 `tools/desktop/restart-qoder-ds.ps1`（前置检查 → 等到 0 进程 → 经 Explorer 启动 → 轮询 `bridge.key` 最多 75 秒，失败即打印日志与进程命令行作为证据）。
+- **如何验证**：`<桥状态目录>/qoder/state/bridge.log` 出现 `ACTIVATED`，且其中 `sessionId` 等于绑定值；`status` 返回 `hostConnected=true`。**没有 `bridge.log` 就等于插件从未被加载**——不要在这一步继续怀疑网络或权限。
+
+### 9. 用于启动/重启的 `.ps1` 必须以 **UTF-8 带 BOM** 保存
+
+- **现象**：启动脚本报一堆语法错（`The string is missing the terminator`、`Unexpected token`），且报错发生在"杀进程"之前；看起来像"重启没生效"，实际是脚本压根没跑起来。
+- **根因**：Windows PowerShell 5.1 读取**无 BOM** 的 `.ps1` 时按系统 ANSI 代码页（简体中文环境为 GBK）解码，文件里的中文注释被解成乱码，引号与字符串终止符随之错位，解析阶段即失败。Node 的 `.mjs` 不受影响（一律按 UTF-8 读）。
+- **规避或修复**：`.ps1` 一律存为 UTF-8 **with BOM**（`[System.IO.File]::WriteAllText($p, $text, [System.Text.UTF8Encoding]::new($true))`）；写好后先用解析器自检再执行：
+  `[System.Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$errors)`，`$errors.Count` 必须为 0。
+- **如何验证**：读回前 3 字节应为 `EF BB BF`；解析自检 0 错误；脚本能跑到最后一步。
+
+> ⚠️ 同类陷阱：**用 PowerShell 生成 JSON 种子/夹具时不要用 `Set-Content -Encoding UTF8`**——5.1 会写入 BOM，而 JSON 解析器不接受 BOM（报 `Unexpected token ''`，恰好把 BOM 显示成一个不可见字符）。夹具用 `[System.IO.File]::WriteAllText(..., [System.Text.UTF8Encoding]::new($false))`。
+
+
 ---
 
 ## 五、最小接入检查清单
@@ -180,6 +213,25 @@
 4. [ ] **绑定校验**：显式根就位；WB 会话 `cwd` 精确等于桥根（TRAE 接受根或父目录）；TRAE 确认 `currentSessionId === 绑定值`。
 5. [ ] **派发**：planner `create`/`approve` → 桥 `dispatch`——回执只当"已送达通知"，不当完成凭据。
 6. [ ] **以 history 验收**：队列出现执行端**本人**真实 `claim`/`submit` 才算闭环；planner `accept` 后才算放行（`submit ≠ 放行`）。
+7. [ ] **通道自检留痕**：跑一次 `node tools/probe.mjs build/send/verify <owner> <stamp>`，把 `verify` 的输出存档。
+   - 它证明的是**通道**能送到（与业务单是否轮询无关），换机/重装客户端/改绑定/升级客户端后应重跑。
+   - 判定只看队列 history，**通过退 0、不通过退 1**，可直接进 CI 或交接件。
+   - 每单一个 `stamp`，探测单的 `allowedPaths` 因此各不相同——这样反复探测不会互相阻塞（见共性 6）。
+
+---
+
+## 附：装完之后的三件事（换机/重装同样适用）
+
+接好的通道会**悄无声息地失效**：客户端重装、用户目录被清、状态目录被别的工具占用，都可能让部署产物消失，
+而队列正本（`coordination/board.json`）通常还在——于是"队列看起来正常，但一道任务也送不出去"。
+
+1. **部署产物不在 Git 内、无备份**：桥状态目录与客户端用户目录都是本机态。
+   把你的部署做成**幂等生成脚本**（拷源码 + 定点改写常量 + 隔离自检），换机后重跑即可，不要手动拼。
+   生成前先确认待覆盖目录**不存在或确认可覆盖**，避免误删他人的桥实例。
+2. **队列与部署是两套生命周期**：`board.json` 随仓库走（或被 `.gitignore` 排除但仍在磁盘上），
+   桥状态目录不随仓库走。排查"以前能派发、今天不行"时，**先看部署产物在不在**，再看绑定，最后才怀疑代码。
+3. **改动共享文件前先 `git status`**：多进程并行时，同一个文件可能已有他人在途改动。
+   同一文件只允许一个写端；发现冲突先与对方确认或等其提交，再动手。
 
 ---
 

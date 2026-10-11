@@ -104,6 +104,23 @@ node tools/wsc-hub.mjs --client chatgpt accept '{"id":"TEST-001","note":"报告�
 
 ✅ **联调成功的标志**：任务状态走到 `accepted`（`list` 里可见）。至此两端已具备完整协作能力，日常使用看下面的速查表即可。
 
+### 第 6 步 · 验"通道本身"能不能送到（不是验业务单）
+
+上面的业务单能跑通，可能是因为执行端**轮询**了队列；它并不证明**桥能把任务推进会话**。
+要单独验桥，用只读探测单——一条命令建单，另一条命令判定：
+
+```bash
+node tools/probe.mjs build  workbuddy 20261011a   # 建单+批准（只读、零写入）
+node tools/probe.mjs send   workbuddy 20261011a   # 经桥派发（不经桥也可让执行端自己 claim）
+node tools/probe.mjs verify workbuddy 20261011a   # 唯一判据：history 里有没有本人真实 claim+submit
+```
+
+`verify` 逐项打印判定矩阵（claim/submit 是否**本人**发起、有没有被冒用身份、summary 是否带回约定标记、evidence 是否非空），
+**通过退 0、不通过退 1**，可直接当脚本 gate 用。它不看任何"送达/在线/握手成功"信号——只看队列 history。
+
+> 什么时候该跑：换机或重装客户端后、绑定变更后、客户端升级后、接入新执行端时。
+> 每个 `stamp` 对应一只独立探测单（可反复跑，不会与上一次互相阻塞）。
+
 ## 两种接入形态（MCP / CLI 完全等价）
 
 | | MCP 形态 | CLI 形态 |
@@ -157,6 +174,34 @@ draft ──approve──▶ approved ──claim──▶ in-progress ──sub
 - 排查：`node tools/desktop-dispatch.mjs status workbuddy`。
 - ⚠️ 已知坑：扩展被安装到仓库外时，**不要用"相对层级推导项目根"**（层级不同会解析出错误根，导致所有校验永假）——用环境变量注入或分发时落配置文件。
 
+### 桥通了没？先分清三件事
+
+排查"派发没反应"时按这个顺序，**不要跳步**：
+
+| 层级 | 看什么 | 怎么确认 | 不代表什么 |
+|---|---|---|---|
+| ① 桥进程/宿主 | `status` 的 `hostConnected` / `conversationVerified` / `currentSessionId === targetSessionId` | 派发器 `status <client>` | **不代表任务送到了** |
+| ② 投递 | 派发回执 `nativeInvoked: true`，以及状态目录里的 `*.dispatch.json` 收据 | 派发器 `dispatch <ID>` | **只代表"已注入会话"，不代表被处理** |
+| ③ 闭环 | 队列 history 里执行端**本人**的真实 `claim` + `submit` | `node tools/probe.mjs verify <owner> <stamp>` | 这才是唯一凭据 |
+
+⚠️ 桥调用的返回值**立即返回、不等会话处理**（TRAE 的 `sendAndWaitResponse` 甚至可能回空文本）。
+任何"已送达/握手成功/进程在线"都不能当完成凭据。回执为空既不是失败也不是成功——去查 history。
+
+⚠️ 重发前先看收据里的 `state`：`not-sent` 才允许重派；`delivery-uncertain` 意味着**可能已经送到了**，
+必须先核对队列与会话记录，绝不盲目重发（详见 [PITFALLS.md](PITFALLS.md) 共性 7）。
+
+### Qoder 客户端必须经启动器启动
+
+Qoder 的插件环境变量是**进程级**的：从开始菜单直接打开 = 插件不会被加载（表现为一直"桥未激活"）。
+必须先完全退出，再经启动器 `.cmd` 启动：
+
+```powershell
+powershell.exe -NoProfile -File tools/desktop/restart-qoder-ds.ps1 -BridgeHome <你的私有桥状态目录>
+```
+
+脚本会退干净到 0 进程、经 Explorer 启动启动器、并轮询激活凭据最多 75 秒；失败时打印日志与进程命令行作为证据。
+（`.ps1` 必须存为 UTF-8 **带 BOM**，否则 PowerShell 5.1 按 GBK 解码会把中文注释读成乱码并解析失败——见 PITFALLS.md Qoder 第 8、9 条。）
+
 ## 进阶 1.5 · 多进程共存与独立部署（WSC_ROOT / WSC_BRIDGE_HOME）
 
 两个环境变量解决「工具包部署在独立目录 / 多套桥并行」的场景；**都不设置时默认行为与上游完全一致**。
@@ -201,11 +246,13 @@ your-project/                 # 部署到你的项目时保持此结构（wsc-hu
 └─ tools/                     # 本工具包（代码）
    ├─ wsc-hub.mjs             # 队列中枢（~234 行）：stdio MCP server 与 CLI 双形态，身份钉死、状态机、互斥
    ├─ pair.mjs                # ★新用户入口：一键配对自检 + MCP 配置片段 + 角色操作模板
+   ├─ probe.mjs               # ★通道连通性自检：只读探测单 + build/send/verify，闭环判定退 0/1
    ├─ desktop-dispatch.mjs    # 桌面桥派发（status/dispatch/recover）
    ├─ ekko-mcp.mjs            # Ekko 通道认证 wrapper（依赖官方 ekko-studio 包，见致谢）
    ├─ start-ekko.ps1          # Ekko 控制面标准启动（127.0.0.1:8648，含就绪核验）
    └─ desktop/                # 可选：桌面桥扩展
       ├─ install.ps1          # 安装入口（-Client workbuddy|trae）
+      ├─ restart-qoder-ds.ps1 # Qoder 重启并装载插件（退干净 → 经 Explorer 启动 → 轮询激活）
       ├─ workbuddy/           # WorkBuddy 桌面桥扩展（v0.3.0：pipe + key，conversations.get/runPrompt）
       └─ trae/                # TRAE (VS Code 系) 桌面桥扩展（v0.2.3，部署配置动态解析根）
 ```
