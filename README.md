@@ -2,9 +2,9 @@
 
 **让多个 CLI / AI Agent（ChatGPT、Codex、Claude、TRAE、WorkBuddy、qoder……）围绕同一个项目安全协作的工具包**：一个共享任务队列 + 一个把任务推进到目标会话的桌面桥 + 一个 Ekko 会话通道。纯 Node 内置模块，零第三方依赖。
 
-> 从真实游戏项目（WASTELAND CHOICE）的多 Agent 生产协作中抽出，已在 Windows 本机长期运行。
+> 从真实项目的多 Agent 生产协作中抽出，已在 Windows 本机长期运行。
 >
-> 🔧 **把桥接进真实客户端前，先读 [PITFALLS.md](PITFALLS.md)**——真实 WB / TRAE / Qoder 三通道联调的踩坑与规避清单（每条含现象 / 根因 / 规避 / 验证四项）。
+> 🔧 **把桥接进真实客户端前，先读 [PITFALLS.md](PITFALLS.md)**——真实 WB / TRAE / Qoder等通道联调的踩坑与规避清单（每条含现象 / 根因 / 规避 / 验证四项）。
 
 ## 它解决什么问题
 
