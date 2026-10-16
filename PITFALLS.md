@@ -72,7 +72,12 @@
 > 真正的修法是把 `sent` 移进 `socket.write` 的**回调**（未 flush 即未上线），
 > 并重新审视 timeout / error 分支的语义；改动面较大，需单独评估。
 
+### 8. 客户端读回包前不得 `socket.end()`——Windows 命名管道不支持半关闭
 
+- **现象**：客户端调用返回空回包（`EMPTY_RESPONSE` 之类），看着像服务端没回；但**服务端台账**（`audit.log` 等）明确记了 `ok:true`——「服务端说成功、客户端说空」两边对不上。
+- **根因**：Windows 命名管道**不支持半关闭**。客户端若用 `socket.end(request)` 发完请求即发出写端 FIN，整条管道被拆掉，服务端随后写出的回包无人接收、被丢弃。
+- **规避或修复**：客户端用 `socket.write(request + "\n")` 发送并**保持连接**，由服务端在其回包后 `socket.end()` 收尾。
+- **如何验证**：改法前后各跑一次同一请求——服务端台账两次都记 `ok:true`，但只有 `write` 版客户端能收到非空回包；用临时原始探针（`node -e` 直连 pipe、只 `write` 不 `end`）可直接看到回包内容。
 
 ---
 
@@ -156,19 +161,19 @@
 - **规避或修复**：任务闭环走通道 A（能力完整、可预授权 `--allowed-tools`）；"人要在界面看到"用通道 B 做可见性验证。要载任意任务必须改**自己副本**的常量，并解决会话权限门（未验证项，别当作现成能力）。
 - **如何验证**：通道 A——解析 JSON 回执，`session_id` 等于目标 `<sessionId>` 且 `subtype=success`；通道 B——`receipt` 返回 `deliveryLanded=true && matchesExpected=true`。
 
-### 2. 客户端无法由非 shell 上下文启动
+### 2. 顶层「转交型」exe 启动不可靠：启动即退出、环境变量断在这一跳
 
-- **现象**：`Start-Process <exe>`、`cmd /c start`、直接执行三种方式全部「启动即 `exit 0`」，几秒后进程数归零，连日志目录都不建。
-- **根因**：平台启动机制依赖 shell/Explorer 上下文（实测结论，机理未深究）；只有 `Start-Process explorer.exe <exe>` 能让进程存活。
-- **规避或修复**：经 Explorer 启动；需要带环境变量时用下面第 3 条的组合。启动前必须把整客户端**完全退出**（单实例移交会让新实例自己退出）。
-- **如何验证**：进程持续存活、日志目录生成、`status` 返回 `ok=true`。
+- **现象**：`Start-Process "<客户端安装路径>\<客户端>.exe"`、`cmd /c start`、双击三种方式全部「启动即 `exit 0`」，几秒后进程数归零，连日志目录都不建；随后从开始菜单正常启动，实例 `"environment":0`，dev 插件一个都不加载（见本节 3 条）。
+- **根因**：安装目录**顶层**的 `<客户端>.exe` 是**转交型启动器**——它拉起 `.qoder-versions\<ver>\` 下的**版本化 exe** 后自己退出；环境块与退出码都断在这一跳上。
+- **规避或修复（2026-10-16 实测修正）**：**直接启动版本化 exe**（先在本进程 `$env:` 注入，再 `Start-Process "<客户端安装路径>\.qoder-versions\<ver>\<客户端>.exe"`）实测能存活**且环境变量确实送达**（启动日志出现 `loading unverified local development sources`、`diagnosticCountBySource.convention >= 1`）；原有的「经 Explorer 启动启动器 `.cmd`」仍然可行，但不是唯一解。启动前必须把整客户端**完全退出**（单实例移交会让新实例自己退出）。
+- **如何验证**：进程持续存活、日志目录生成、`status` 返回 `ok=true`，且启动日志证明 env 送达（`environment >= 1` 或 `convention >= 1`）。
 
-### 3. Explorer 不继承注入的环境变量 → 必须用 `.cmd` 启动器
+### 3. 从开始菜单／Explorer 启动不继承注入的环境变量 → 包一层启动器
 
-- **现象**：在 PowerShell 里设好 `QODER_APP_PLUGIN_ALLOW_UNVERIFIED` / `QODER_APP_PLUGIN_DEV_DIRS` 再启动客户端，实例 `"environment":0`，dev 插件一个都不加载。
-- **根因**：Explorer 用**自己的环境块**启动子进程，外部注入无效。
-- **规避或修复**：写一个 `.cmd`（内部 `set` 好两个环境变量 + `start` 客户端），再**经 Explorer 启动这个 `.cmd`**（或双击）。
-- **如何验证**：启动日志显示 `"environment":>=1`、`finalPluginCount` 包含 dev 插件且 `outcome: completed`。
+- **现象**：在 PowerShell 里设好 `QODER_APP_PLUGIN_ALLOW_UNVERIFIED` / `QODER_APP_PLUGIN_DEV_DIRS`，再从开始菜单（或经 Explorer）启动客户端，实例 `"environment":0`，dev 插件一个都不加载。
+- **根因**：经 Explorer／开始菜单启动时，Explorer 用**自己的环境块**启动子进程，外部注入无效。**注意与本节 2 条互补**：直接启动版本化 exe 则**继承**调用进程的环境（2026-10-16 实测 `convention >= 1`）。
+- **规避或修复**：二选一——(a) 直接 `Start-Process` **版本化 exe**（先在本进程 `$env:` 注入）；(b) 写一个 `.cmd`（内部 `set` 好两个环境变量 + `start` **版本化 exe**），再**经 Explorer 启动这个 `.cmd`**（或双击）。两条都别碰顶层转交型 exe。
+- **如何验证**：启动日志显示 `"environment":>=1`（或 `diagnosticCountBySource.convention >= 1`）、`finalPluginCount` 包含 dev 插件且 `outcome: completed`。
 - **注意**：`QODER_APP_PLUGIN_ALLOW_UNVERIFIED=true` 是进程级开关，会放行其它未验证本地插件——只在验证窗口内开，验证完**正常退出客户端**关闭它，不写注册表/用户环境变量。
 
 ### 4. 插件自举三要素：`DEV_DIRS` 多根、同级 `config.json`、`state/bridge.key`
@@ -184,6 +189,7 @@
 - **根因**：CLI 回包可能在 `continueSession` 进行中被超时丢弃——消息可能已经送进会话。
 - **规避或修复**：先查 `state/requests.json` 台账（记录 `state: sent`）与会话 `.jsonl` 文件（是否新增对应 user 记录），**确认后再决定是否重发，绝不盲目重发**。
 - **如何验证**：台账与会话文件双证据一致；重发前先确认原请求确实未落地。
+- **补充成因（2026-10-16 实测）**：`EMPTY_RESPONSE` 还有**第二个独立成因**——**客户端半关闭命名管道**（客户端 `socket.end()` 发完即 FIN，服务端回包丢失，而服务端台账已记 `ok:true`）。判据：**服务端有成功台账、客户端却收空包** → 先查客户端是不是 `end()` 了。修法与验证见共性 8。
 
 ### 6. receipt 不能在会话内部结算
 
@@ -202,8 +208,8 @@
 ### 8. 客户端必须经启动器启动，裸启动等于没装插件
 
 - **现象**：插件、启动器、环境变量都齐了，`bridge.key` 就是不生成；`status` 一直报"桥未激活"。
-- **根因**：`QODER_APP_PLUGIN_DEV_DIRS` 等是**进程级**环境变量；从开始菜单／任务栏直接打开客户端，进程环境里没有它们，插件根本不会被加载。而 `Start-Process <exe>` 又会立刻退出（见本节 2、3 条），所以"重启一下"这个动作本身很容易做成无效重启。
-- **规避或修复**：**只经启动器 `.cmd` 启动**：退干净客户端 → `Start-Process explorer.exe <启动器.cmd>` → 轮询激活凭据。仓库提供 `tools/desktop/restart-qoder-ds.ps1`（前置检查 → 等到 0 进程 → 经 Explorer 启动 → 轮询 `bridge.key` 最多 75 秒，失败即打印日志与进程命令行作为证据）。
+- **根因**：`QODER_APP_PLUGIN_DEV_DIRS` 等是**进程级**环境变量；从开始菜单／任务栏直接打开客户端，进程环境里没有它们，插件根本不会被加载。而**顶层** `Start-Process <exe>` 又会立刻退出（见本节 2、3 条），所以"重启一下"这个动作本身很容易做成无效重启。
+- **规避或修复**：**只经启动器 `.cmd` 启动**：退干净客户端 → `Start-Process explorer.exe <启动器.cmd>` → 轮询激活凭据。（2026-10-16 实测：直接 `Start-Process` **版本化 exe** 亦可，见本节 2 条。）仓库提供 `tools/desktop/restart-qoder-ds.ps1`（前置检查 → 等到 0 进程 → 经 Explorer 启动 → 轮询 `bridge.key` 最多 75 秒，失败即打印日志与进程命令行作为证据）。
 - **如何验证**：`<桥状态目录>/qoder/state/bridge.log` 出现 `ACTIVATED`，且其中 `sessionId` 等于绑定值；`status` 返回 `hostConnected=true`。**没有 `bridge.log` 就等于插件从未被加载**——不要在这一步继续怀疑网络或权限。
 
 ### 9. 用于启动/重启的 `.ps1` 必须以 **UTF-8 带 BOM** 保存
@@ -215,6 +221,45 @@
 - **如何验证**：读回前 3 字节应为 `EF BB BF`；解析自检 0 错误；脚本能跑到最后一步。
 
 > ⚠️ 同类陷阱：**用 PowerShell 生成 JSON 种子/夹具时不要用 `Set-Content -Encoding UTF8`**——5.1 会写入 BOM，而 JSON 解析器不接受 BOM（报 `Unexpected token ''`，恰好把 BOM 显示成一个不可见字符）。夹具用 `[System.IO.File]::WriteAllText(..., [System.Text.UTF8Encoding]::new($false))`。
+
+### 10. App Plugin 清单 `main` 必须位于 `dist/node/` 下（否则 `APP_PLUGIN_MANIFEST_INVALID`）
+
+- **现象**：本地 app 插件登记进开发源后，宿主日志出现 `App Plugin discovery issue {"errorCode":"APP_PLUGIN_MANIFEST_INVALID","errorDetail":"APP_PLUGIN_MANIFEST_INVALID:<id>"}`，激活凭据（`state/bridge.key`）永不生成；清单里 `id` / `name` / `version` / `activationEvents` / `permissions` / `engines` 全部合法也照报。
+- **根因**：宿主对 app 插件清单有一层**硬校验**，`main` 必须落在 `dist/node/` 之下——随客户端发行的内置插件**全部**是 `dist/node/main.cjs`。实测边界：`dist/node/<file>` 通过；`<file>`、`a/b/<file>`、`plugin/dist/node/<file>`、`toolongdirname/<file>` 一律 `APP_PLUGIN_MANIFEST_INVALID`。扩展名不限（`.cjs`/`.mjs`/`.js` 均可）。
+- **规避或修复**：`main` 固定写 `dist/node/<entry>`；真正实现可放在任意位置，用 `dist/node/main.cjs` 做**薄壳**动态 import（`import(pathToFileURL(realEntry).href)`）转发 `activate` / `deactivate`。
+- **如何验证**：宿主日志 `App Plugin discovery completed {"loaded":N,"invalid":0,...}` 且随后 `operation performance {"operationKind":"activation","outcome":"completed"}`；激活凭据生成。
+
+### 11. App Plugin 清单位置固定为 `<插件根>/.qoder-app-plugin/plugin.json`
+
+- **现象**：清单放到插件根目录下或 `.qoder-plugin/`，报的是 `APP_PLUGIN_MANIFEST_MISSING`（注意**不是** `INVALID`），看起来像"装了但没生效"。
+- **根因**：宿主只认 `<插件根>/.qoder-app-plugin/plugin.json`；`.qoder-plugin/` 属于**另一套**（Agent SDK）格式，二者不通用。
+- **规避或修复**：app 插件清单放 `.qoder-app-plugin/` 子目录；`.qoder-plugin/` 只用于技能/MCP/命令那套。
+- **如何验证**：错位时报 `MISSING`、放到正确位置才进入字段校验（此时才可能报 `INVALID`）。
+
+### 12. 开发源扫描受**进程级开关**总控；约定目录 `~/.qoder-cn/app/dev-extensions` 免配 `DEV_DIRS`
+
+- **现象**：约定目录里已登记插件，从开始菜单正常启动客户端却完全不加载；诊断 `diagnosticCountBySource.convention = 0`。
+- **根因**：宿主只有在 `QODER_APP_PLUGIN_ALLOW_UNVERIFIED === "true"` 时才启用「未验证本地开发源」，来源分四类：`environment`（`DEV_DIRS`）、`convention`（约定目录）、`developmentCatalog`、`packagedCatalog`（随包内置）。开关关闭时**连约定目录都不扫**。
+- **规避或修复**：启动器里设开关即可；插件以**目录/Junction**登记到 `%USERPROFILE%\.qoder-cn\app\dev-extensions\<任一子目录>`（子目录名不必等于插件 `id`/`name`），无需再配 `DEV_DIRS`。两处同时指向同一插件会被容忍（不冲突），但没必要。
+- **如何验证**：启动日志 `Packaged App Plugin system is loading unverified local development sources {"conventionDirectory":"~\\.qoder-cn\\app\\dev-extensions"}`；`discovery completed` 的 `diagnosticCountBySource.convention >= 1`。
+
+### 13. app 插件发现失败的诊断入口在**主进程日志**，不在 CLI
+
+- **现象**：插件不加载，翻 CLI 与插件目录都看不出所以然。
+- **根因**：app 插件的发现／校验／激活全部发生在客户端**主进程**，证据只写在主进程日志里。
+- **规避或修复**：看 `%APPDATA%\<客户端用户数据目录>\logs\<时间戳>-<pid>-<hash>\main.log`，过滤 `AppPlugin`：
+  - `discovery completed` → `loaded` / `invalid` 计数与 `diagnosticCountBySource`（看是哪一类来源命中）；
+  - `discovery issue` → `errorCode`（`APP_PLUGIN_MANIFEST_MISSING` / `APP_PLUGIN_MANIFEST_INVALID` / `APP_PLUGIN_VIEW_ACTIVATION_MISSING`）；
+  - `operation performance` → `operationKind:"activation"` 的 `outcome`。
+- **如何验证**：先按上述三类行定位到具体 `errorCode`，再改清单；改完重跑应看到 `invalid:0` + `outcome:"completed"`。
+- **附带规则**：若清单含 `contributes.views[]`，每个 `views[].id` 必须在 `activationEvents` 里声明 `onView:<id>`，否则报 `APP_PLUGIN_VIEW_ACTIVATION_MISSING`。
+
+### 14. CLI `plugins install` 与 GUI 的 App Plugin 是两套，装不上不等于清单写错
+
+- **现象**：用 CLI `plugins install <本地目录>` 装自己写的插件，`plugins list` 显示 enabled，GUI 却从不加载。
+- **根因**：CLI 的插件系统只吃 **Agent SDK 插件**（`.qoder-plugin/`：skills/agents/commands/hooks/mcpServers，兼容 `.claude-plugin`），登记在 `~/.qoder-cn/plugins/installed_plugins_v2.json` 与 `~/.qoder-cn/settings.json` 的 `enabledPlugins`；GUI 的 **App Plugin** 是**另一套**（`.qoder-app-plugin/` + 开发源/内置目录，见本节 12 条）。`install` 对 app 插件最多 `validate` 通过，**没有 GUI 加载通道**。
+- **规避或修复**：app 插件走「开发源登记」（本节 12 条），别用 `plugins install` 挂它；要装技能/MCP/命令才用 `plugins install`。
+- **如何验证**：`plugins list` 里有该插件，但主进程日志的 `discovery completed` 不含它 → 证明 `install` 与 GUI 加载无关。
 
 
 ---
